@@ -4,6 +4,7 @@ This repository contains the source files for the figures used in various mechan
 
 The figures are used in the following courses:
 - https://oit.tudelft.nl/CT1000
+- https://oit.tudelft.nl/CT1310
 - https://oit.tudelft.nl/CTB2210
 - https://oit.tudelft.nl/CEG-mechanics-BSc
 
