@@ -25,12 +25,19 @@ jobs:
         if: ${{ github.actor == 'github-actions[bot]' }}
         run: |
           echo "Triggered by github-actions[bot] — exiting to avoid a loop."
+      - name: Create GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
       - name: Checkout repository
         if: ${{ github.actor != 'github-actions[bot]' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
           lfs: false
+          token: ${{ steps.app-token.outputs.token }}
       - name: Configure git user
         if: ${{ github.actor != 'github-actions[bot]' }}
         run: |
