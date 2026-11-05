@@ -1,0 +1,166 @@
+on:
+  workflow_dispatch:  # Manual trigger with option to reset
+    inputs:
+      reset_lfs:
+        description: 'Reset and migrate existing files (removes non-binary files from LFS)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+  push:
+    branches:
+      - '**'
+
+permissions:
+  contents: write
+
+jobs:
+  detect-and-update:
+    name: Detect binary files and update .gitattributes
+    runs-on: ubuntu-latest
+    steps:
+      - name: Exit when run by GitHub Actions bot
+        if: ${{ github.actor == 'github-actions[bot]' }}
+        run: |
+          echo "Triggered by github-actions[bot] — exiting to avoid a loop."
+      - name: Checkout repository
+        if: ${{ github.actor != 'github-actions[bot]' }}
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: false
+      - name: Configure git user
+        if: ${{ github.actor != 'github-actions[bot]' }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+      - name: Install Git LFS
+        if: ${{ github.actor != 'github-actions[bot]' }}
+        run: |
+          git lfs install
+      - name: Pull LFS files for reset
+        if: ${{ github.actor != 'github-actions[bot]' && github.event.inputs.reset_lfs == 'true' }}
+        run: |
+          git lfs pull
+          git lfs checkout || true
+          echo "LFS env:" && git lfs env | sed -n '1,40p'
+          echo "Sample LFS entries:" && git lfs ls-files -l | sed -n '1,40p'
+          echo "LFS files downloaded. Sample file check:"
+          ls -lh file/*.png 2>/dev/null | head -3 || echo "No PNG files found"
+      - name: Detect binary file types under file/ and build new .gitattributes
+        if: ${{ github.actor != 'github-actions[bot]' }}
+        run: |
+          set -euo pipefail
+          REPO_ROOT="$(pwd)"
+          EXISTING="${REPO_ROOT}/.gitattributes"
+          TMP_BASE="$(mktemp)"
+          TMP_EXTS="$(mktemp)"
+          # Preserve existing .gitattributes
+          # Only strip LFS lines in reset mode; otherwise keep everything
+          if [ "${{ github.event.inputs.reset_lfs }}" = "true" ]; then
+            echo "Reset mode: removing old LFS patterns" >&2
+            if [ -f "${EXISTING}" ]; then
+              grep -vE 'filter=lfs diff=lfs merge=lfs' "${EXISTING}" > "${TMP_BASE}" || true
+            else
+              touch "${TMP_BASE}"
+            fi
+          else
+            if [ -f "${EXISTING}" ]; then
+              cp "${EXISTING}" "${TMP_BASE}"
+            else
+              touch "${TMP_BASE}"
+            fi
+          fi
+          # Collect extensions of binary files under "file/"
+          : > "${TMP_EXTS}"
+          echo "Scanning files in file/ directory..."
+          if [ "${{ github.event.inputs.reset_lfs }}" = "true" ]; then
+            echo "Reset mode: deriving extensions from current LFS-tracked files" >&2
+            git lfs ls-files -n | grep '^file/' | while IFS= read -r f; do
+              if [ -f "$f" ]; then
+                ext="${f##*.}"
+                # Skip known text-y extensions we never want in LFS
+                if printf "%s" "$ext" | grep -qiE '^(fig|tex|sh|md|txt|py|csv)$'; then
+                  echo "  $f -> skip (text-y ext)" >&2
+                  continue
+                fi
+                echo "  $f -> from LFS (extension: $ext)" >&2
+                if [ "$ext" != "$f" ] && [ -n "$ext" ]; then
+                  echo "$ext"
+                fi
+              fi
+            done | sort -u > "${TMP_EXTS}" || true
+          else
+            git ls-files -z -- file | while IFS= read -r -d '' f; do
+              if [ -f "$f" ]; then
+                ext="${f##*.}"
+                # Skip known text extensions
+                if printf "%s" "$ext" | grep -qiE '^(fig|tex|sh|md|txt|py|csv)$'; then
+                  echo "  $f -> skip (text ext: $ext)" >&2
+                  continue
+                fi
+                # Use git's binary heuristic via numstat against /dev/null
+                numstat=$(git diff --no-index --numstat /dev/null "$f" 2>/dev/null || true)
+                if printf "%s" "$numstat" | grep -qE '^[[:space:]]*-[[:space:]]*-[[:space:]]'; then
+                  if [ "$ext" != "$f" ] && [ -n "$ext" ]; then
+                    echo "  $f -> binary (extension: $ext)" >&2
+                    echo "$ext"
+                  fi
+                else
+                  echo "  $f -> text" >&2
+                fi
+              fi
+            done | sort -u > "${TMP_EXTS}" || true
+          fi
+          echo "Binary extensions found:"
+          cat "${TMP_EXTS}" || echo "  (none)"
+          # Build new .gitattributes with extension patterns
+          cat "${TMP_BASE}" > "${REPO_ROOT}/.gitattributes.new"
+          if [ -s "${TMP_EXTS}" ]; then
+            echo "" >> "${REPO_ROOT}/.gitattributes.new"
+            echo "# Binary file types tracked with LFS" >> "${REPO_ROOT}/.gitattributes.new"
+            while IFS= read -r ext; do
+              printf "*.%s filter=lfs diff=lfs merge=lfs -text\n" "$ext"
+            done < "${TMP_EXTS}" >> "${REPO_ROOT}/.gitattributes.new"
+          fi
+          # Remove duplicate lines while preserving first occurrence
+          awk '!seen[$0]++' "${REPO_ROOT}/.gitattributes.new" > "${REPO_ROOT}/.gitattributes.final"
+          mv "${REPO_ROOT}/.gitattributes.final" "${REPO_ROOT}/.gitattributes"
+          # Clean up temp files
+          rm -f "${TMP_BASE}" "${TMP_EXTS}" "${REPO_ROOT}/.gitattributes.new"
+          echo "Computed .gitattributes (preview):"
+          git --no-pager diff -- .gitattributes || true
+      - name: Commit and push updated .gitattributes if changed
+        if: ${{ github.actor != 'github-actions[bot]' }}
+        run: |
+          if git status --porcelain -- .gitattributes | grep -q .; then
+            git add .gitattributes
+            git commit -m "chore: update .gitattributes for binary file types (automated)"
+            git push
+          else
+            echo "No .gitattributes changes to commit."
+          fi
+      - name: Renormalize files for updated .gitattributes
+        if: ${{ github.actor != 'github-actions[bot]' }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event.inputs.reset_lfs }}" = "true" ]; then
+            echo "Reset mode: renormalizing all files to move text-y files OUT of LFS..."
+          else
+            echo "Normal mode: renormalizing to move new binary types INTO LFS..."
+          fi
+          git add --renormalize file/
+          if git status --porcelain | grep -q .; then
+            echo "Changes after renormalize:"
+            git --no-pager status --porcelain
+            if [ "${{ github.event.inputs.reset_lfs }}" = "true" ]; then
+              git commit -m "chore: renormalize files per updated .gitattributes (reset: move text files out of LFS)"
+            else
+              git commit -m "chore: migrate new binary files to LFS (automated)"
+            fi
+            git push
+          else
+            echo "No renormalization changes detected."
+          fi
