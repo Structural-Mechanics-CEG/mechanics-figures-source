@@ -47,9 +47,8 @@ jobs:
           git lfs checkout || true
           echo "LFS env:" && git lfs env | sed -n '1,40p'
           echo "Sample LFS entries:" && git lfs ls-files -l | sed -n '1,40p'
-          echo "LFS files downloaded. Sample file check:"
-          ls -lh file/*.png 2>/dev/null | head -3 || echo "No PNG files found"
-      - name: Detect binary file types under file/ and build new .gitattributes
+          echo "LFS files downloaded."
+      - name: Detect binary file types and build new .gitattributes
         if: ${{ github.actor != 'github-actions[bot]' }}
         run: |
           set -euo pipefail
@@ -73,12 +72,12 @@ jobs:
               touch "${TMP_BASE}"
             fi
           fi
-          # Collect extensions of binary files under "file/"
+          # Collect extensions of binary files across the repository
           : > "${TMP_EXTS}"
-          echo "Scanning files in file/ directory..."
+          echo "Scanning tracked files in the repository..."
           if [ "${{ github.event.inputs.reset_lfs }}" = "true" ]; then
             echo "Reset mode: deriving extensions from current LFS-tracked files" >&2
-            git lfs ls-files -n | grep '^file/' | while IFS= read -r f; do
+            git lfs ls-files -n | while IFS= read -r f; do
               if [ -f "$f" ]; then
                 ext="${f##*.}"
                 # Skip known text-y extensions we never want in LFS
@@ -93,7 +92,7 @@ jobs:
               fi
             done | sort -u > "${TMP_EXTS}" || true
           else
-            git ls-files -z -- file | while IFS= read -r -d '' f; do
+            git ls-files -z | while IFS= read -r -d '' f; do
               if [ -f "$f" ]; then
                 ext="${f##*.}"
                 # Skip known text extensions
@@ -151,7 +150,7 @@ jobs:
           else
             echo "Normal mode: renormalizing to move new binary types INTO LFS..."
           fi
-          git add --renormalize file/
+          git add --renormalize .
           if git status --porcelain | grep -q .; then
             echo "Changes after renormalize:"
             git --no-pager status --porcelain
